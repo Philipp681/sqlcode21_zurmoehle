@@ -1,0 +1,158 @@
+--Notes: This code creates new tables with the calculated indices: TAVG , TN , TD and Td-n were
+--addes to the same table calles indices, the other indices e.g. the cross indices had its own table
+
+--CREATE TABLES
+--TAVG
+
+DROP TABLE IF EXISTS temp_all;
+CREATE TABLE temp_all AS
+SELECT  
+metadata.device_id as HOBO_ID,
+avg(data.value) as avg_t
+FROM data
+Left JOIN metadata ON data.meta_id = metadata.id
+WHERE metadata.term_id = 11
+group by metadata.device_id 
+order by metadata.device_id ASC;
+ALTER TABLE temp_all ADD CONSTRAINT pkey_tempall 
+PRIMARY KEY (HOBO_id);
+SELECT*FROM temp_all;
+
+
+--AVG daytime
+DROP TABLE IF EXISTS tempdays;
+CREATE TABLE tempdays AS
+SELECT
+metadata.device_id as HOBO_id,
+avg(data.value) as avg_t_d
+FROM data
+Left JOIN metadata ON data.meta_id=metadata.id
+WHERE metadata.term_id=11
+AND EXTRACT(HOUR FROM data.tstamp) BETWEEN 6 and 18
+group by metadata.device_id
+order by metadata.device_id ASC;
+ALTER TABLE tempdays ADD CONSTRAINT pkey_tempdays 
+PRIMARY KEY (HOBO_id);
+SELECT*FROM tempdays;
+
+--AVG nighttime
+
+DROP TABLE IF EXISTS tempnight;
+CREATE TABLE tempnight AS
+SELECT
+metadata.device_id as HOBO_id,
+avg(data.value) as avg_t_n
+FROM data
+Left JOIN metadata ON data.meta_id=metadata.id
+WHERE metadata.term_id=11
+AND (EXTRACT(HOUR FROM data.tstamp) <6
+OR EXTRACT (HOUR FROM data.tstamp) >= 18)
+group by metadata.device_id
+order by metadata.device_id ASC;
+ALTER TABLE tempnight ADD CONSTRAINT pkey_tempnight
+PRIMARY KEY (HOBO_id);
+SELECT*FROM tempnight;
+
+--TND diff with colmuns from day and night 
+
+DROP TABLE IF EXISTS tempdiff;
+CREATE TABLE tempdiff AS
+SELECT 
+tempdays.hobo_id,
+tempdays.avg_t_d,
+tempnight.avg_t_n,
+(tempdays.avg_t_d - tempnight.avg_t_n) as diff_tdn
+FROM 
+tempdays
+Left JOIN tempnight ON tempdays.hobo_id=tempnight.hobo_id;
+ALTER TABLE tempdif ADD CONSTRAINT pkey_tempdiff
+PRIMARY KEY (hobo_id);
+SELECT*FROM tempdiff;
+
+
+--indices
+
+DROP TABLE IF EXISTS indices;
+CREATE TABLE indices AS
+SELECT 
+tempdiff.hobo_id,
+tempdiff.avg_t_d,
+tempdiff.avg_t_n,
+tempdiff.diff_tdn,
+temp_all.avg_t
+FROM 
+tempdiff
+Left JOIN temp_all ON tempdiff.hobo_id=temp_all.hobo_id;
+ALTER TABLE indices ADD CONSTRAINT pkey_temp
+PRIMARY KEY (hobo_id);
+SELECT*FROM indices;
+
+
+
+
+--Cross Indices
+--Add neigbouring IDs
+
+DROP table if exists meta21;
+create table meta21 as
+SELECT *, 
+	(SELECT id FROM metadata ly WHERE term_id=9 ORDER BY st_distance(m.location, ly.location) ASC LIMIT 1) as close_meta20_id,
+	(SELECT id FROM metadata ly WHERE term_id=7 ORDER BY st_distance(m.location, ly.location) ASC LIMIT 1) as close_meta19_id
+	FROM metadata m
+	WHERE term_id=11 AND sensor_id=1;
+    ALTER Table meta21 ADD constraint pkey_meta21 
+    Primary key (id);
+SELECT * 
+FROM meta21;
+
+--norm
+DROP VIEW IF EXISTS data_norm;
+CREATE VIEW data_norm AS
+-- From here, it's only a single SQL statement
+SELECT
+	row_number() OVER (PARTITION BY meta_id ORDER BY tstamp ASC) as measurement_index,
+	*,
+	value - avg(value) OVER (PARTITION BY meta_id) AS norm,
+	avg(value) OVER (PARTITION BY meta_id) AS group_avg	
+FROM data;
+SELECT * FROM data_norm;
+
+--Tcorr1Y Korrelation 2021 zu 2020
+--to compare the measurements from the three years which all have diffrent measurement periods an 
+--ID had to be add to the tables so e.g. the first ID refers to the first measurement in every year and so they
+--can be correlated correctly
+
+Drop table if exists cross1;
+CREATE table cross1 as
+	SELECT 
+		meta21.id, 								
+		avg(d.value) AS "mean",					
+		corr(d.norm, d20.norm) AS "Tcorr1Y"		
+	FROM data_norm AS d													
+	JOIN meta21 on meta21.id = d.meta_id		
+	JOIN metadata m20 on meta21.close_meta20_id=m20.id
+	JOIN data_norm d20 on m20.id=d20.meta_id AND d.measurement_index=d20.measurement_index
+	GROUP BY meta21.id;
+ALTER TABLE cross1 ADD CONSTRAINT pkey_cross1
+PRIMARY KEY (id);
+SELECT*FROM cross1
+JOIN metadata on cross1.id=metadata.id;
+
+--Tcorr2Y Korrelation 2021 zu 2019
+
+Drop table if exists cross2;
+CREATE table cross2 as
+	SELECT 
+		meta21.id, 								
+		avg(d.value) AS "mean",					
+		corr(d.norm, d19.norm) AS "Tcorr2Y"		
+	FROM data_norm AS d													
+	JOIN meta21 on meta21.id = d.meta_id		
+	JOIN metadata m19 on meta21.close_meta19_id=m19.id
+	JOIN data_norm d19 on m19.id=d19.meta_id AND d.measurement_index=d19.measurement_index
+	GROUP BY meta21.id;
+ALTER TABLE cross2 ADD CONSTRAINT pkey_cross2
+PRIMARY KEY (id);
+SELECT*FROM cross2
+JOIN metadata on cross2.id=metadata.id
+
